@@ -13,6 +13,7 @@ for (const list of document.querySelectorAll('[data-tabs]')) {
       if (!selected) panel.querySelectorAll('video').forEach(video => video.pause());
     }
     if (moveFocus) tab.focus();
+    snapVideoFrames();
   }
   for (const [index, tab] of tabs.entries()) {
     tab.addEventListener('click', () => activate(tab));
@@ -27,6 +28,19 @@ for (const list of document.querySelectorAll('[data-tabs]')) {
   }
   activate(tabs[0]);
 }
+// A centered layout can leave a video's left edge on a half pixel; the edge then shimmers while it plays.
+// Shift each frame by the fractional remainder so both vertical edges sit on whole pixels.
+function snapVideoFrames() {
+  for (const frame of document.querySelectorAll('.video-frame')) {
+    frame.style.transform = '';
+    const rect = frame.getBoundingClientRect();
+    if (!rect.width) continue;
+    const dx = Math.round(rect.left) - rect.left;
+    if (Math.abs(dx) > 0.01) frame.style.transform = `translateX(${dx.toFixed(3)}px)`;
+  }
+}
+window.addEventListener('resize', snapVideoFrames);
+window.addEventListener('load', snapVideoFrames);
 const videos = [...document.querySelectorAll('video')];
 // Play on request. Pause competing or off-screen videos to limit bandwidth and motion.
 for (const video of videos) video.addEventListener('play', () => videos.forEach(other => { if (other !== video) other.pause(); }));
