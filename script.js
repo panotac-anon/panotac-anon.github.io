@@ -10,10 +10,11 @@ for (const list of document.querySelectorAll('[data-tabs]')) {
       item.setAttribute('aria-selected', String(selected));
       item.tabIndex = selected ? 0 : -1;
       panel.hidden = !selected;
-      if (!selected) panel.querySelectorAll('video').forEach(video => video.pause());
+      if (!selected) panel.querySelectorAll('video').forEach(video => { if (!video.paused) pauseManaged(video); });
     }
     if (moveFocus) tab.focus();
     snapVideoFrames();
+    requestAnimationFrame(syncPlayback);
   }
   for (const [index, tab] of tabs.entries()) {
     tab.addEventListener('click', () => activate(tab));
@@ -42,10 +43,107 @@ function snapVideoFrames() {
 window.addEventListener('resize', snapVideoFrames);
 window.addEventListener('load', snapVideoFrames);
 const videos = [...document.querySelectorAll('video')];
-// Play on request. Pause competing or off-screen videos to limit bandwidth and motion.
-for (const video of videos) video.addEventListener('play', () => videos.forEach(other => { if (other !== video) other.pause(); }));
+// Silent demos play only when visible; preserve explicit pauses and sound playback.
+const visibility = new Map();
+const userPaused = new WeakSet();
+const managedPauses = new WeakSet();
+const pendingPlay = new WeakSet();
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function pauseManaged(video) {
+  if (!video.paused) { managedPauses.add(video); video.pause(); }
+}
+function isVisibleVideo(video) {
+  return (visibility.get(video) || 0) >= 0.35 && !video.closest('[hidden], [inert]');
+}
+function syncPlayback() {
+  const soundPlaying = videos.some(video => !video.defaultMuted && !video.paused);
+  for (const video of videos) {
+    const visible = !document.hidden && isVisibleVideo(video);
+    if (!visible) { pauseManaged(video); continue; }
+    if (!video.defaultMuted) continue; // Sonification remains a user-started, audible demo.
+    if (soundPlaying) { pauseManaged(video); continue; }
+    if (reducedMotion.matches || userPaused.has(video) || !video.paused || pendingPlay.has(video)) continue;
+    video.muted = true;
+    pendingPlay.add(video);
+    video.play().catch(() => {}).finally(() => {
+      pendingPlay.delete(video);
+      if (document.hidden || !isVisibleVideo(video)) pauseManaged(video);
+    });
+  }
+}
+for (const video of videos) {
+  if (video.defaultMuted) video.loop = true;
+  video.addEventListener('pause', () => {
+    if (managedPauses.has(video)) managedPauses.delete(video);
+    else userPaused.add(video);
+  });
+  video.addEventListener('play', () => {
+    userPaused.delete(video);
+    if (!video.defaultMuted) videos.forEach(other => { if (other !== video) pauseManaged(other); });
+  });
+  if (!video.defaultMuted) {
+    video.addEventListener('pause', syncPlayback);
+    video.addEventListener('ended', syncPlayback);
+  }
+}
 if ('IntersectionObserver' in window) {
-  const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (!entry.isIntersecting) entry.target.pause(); }), { threshold: 0 });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => visibility.set(entry.target, entry.intersectionRatio));
+    syncPlayback();
+  }, {threshold: [0, 0.35, 0.6, 1]});
   videos.forEach(video => observer.observe(video));
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) videos.forEach(video => video.pause()); });
+document.addEventListener('visibilitychange', syncPlayback);
+reducedMotion.addEventListener('change', () => {
+  if (reducedMotion.matches) videos.filter(video => video.defaultMuted).forEach(pauseManaged);
+  else syncPlayback();
+});
+
+// Keep each carousel independent; play only its visible, selected slide.
+for (const carousel of document.querySelectorAll('[data-carousel]')) {
+  const track = carousel.querySelector('.carousel-track');
+  const slides = [...carousel.querySelectorAll('.carousel-slide')];
+  const dots = [...carousel.querySelectorAll('[data-slide]')];
+  const previous = carousel.querySelector('.carousel-prev');
+  const next = carousel.querySelector('.carousel-next');
+  let current = 0;
+  function update(index) {
+    current = index;
+    slides.forEach((slide, i) => {
+      const active = i === index;
+      slide.classList.toggle('is-current', active);
+      slide.inert = !active;
+      if (!active) pauseManaged(slide.querySelector('video'));
+      if (active) dots[i].setAttribute('aria-current', 'true');
+      else dots[i].removeAttribute('aria-current');
+    });
+    previous.disabled = index === 0;
+    next.disabled = index === slides.length - 1;
+    requestAnimationFrame(syncPlayback);
+  }
+  function go(index, smooth = true) {
+    index = Math.max(0, Math.min(slides.length - 1, index));
+    update(index);
+    track.scrollTo({left: slides[index].offsetLeft - (track.clientWidth - slides[index].offsetWidth) / 2,
+      behavior: smooth && !matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'instant'});
+  }
+  previous.addEventListener('click', () => go(current - 1));
+  next.addEventListener('click', () => go(current + 1));
+  dots.forEach((dot, i) => dot.addEventListener('click', () => go(i)));
+  track.addEventListener('keydown', event => {
+    if (event.target !== track) return;
+    const index = {ArrowLeft: current - 1, ArrowRight: current + 1, Home: 0, End: slides.length - 1}[event.key];
+    if (index !== undefined) { event.preventDefault(); go(index); }
+  });
+  let scrollFrame;
+  track.addEventListener('scroll', () => {
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = requestAnimationFrame(() => {
+      const center = track.scrollLeft + track.clientWidth / 2;
+      const distances = slides.map(slide => Math.abs(slide.offsetLeft + slide.offsetWidth / 2 - center));
+      update(distances.indexOf(Math.min(...distances)));
+    });
+  }, {passive: true});
+  new ResizeObserver(() => go(current, false)).observe(track);
+  update(0);
+}
